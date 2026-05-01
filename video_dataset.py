@@ -7,7 +7,7 @@ import random
 from tqdm import tqdm
 
 class VideoSequenceDataset(Dataset):
-    def __init__(self, lpw_root, subject_ids, img_size=(45, 60), sequence_length=10, stride=1, augment_prob=0.5):
+    def __init__(self, lpw_root, subject_ids, img_size=(45, 60), sequence_length=10, stride=1, augment_prob=0.5, data_name=""):
         """
         lpw_root: LPW 数据集根目录 (如 ./LPW/)
         subject_ids: 受试者ID列表 (例如 [1, 2, 3, ...])
@@ -15,6 +15,7 @@ class VideoSequenceDataset(Dataset):
         sequence_length: 序列长度（LSTM需要的帧数）
         stride: 序列之间的步长
         augment_prob: 数据增强的概率
+        data_name: 数据集名称
         """
         self.lpw_root = lpw_root
         self.subject_ids = subject_ids
@@ -23,6 +24,7 @@ class VideoSequenceDataset(Dataset):
         self.stride = stride
         self.cached_sequences = []   # 存储所有 (sequence_tensor, target_tensor)
         self.augment_prob = augment_prob
+        self.data_name = data_name
 
         # 收集所有视频文件路径
         all_video_paths = []
@@ -46,7 +48,7 @@ class VideoSequenceDataset(Dataset):
                 else:
                     print(f"Warning: Label file {label_path} not found, skipping {vf}")
 
-        print(f"正在加载数据集，共 {len(all_video_paths)} 个视频...")
+        print(f"正在加载{self.data_name}数据集，共 {len(all_video_paths)} 个视频...")
         
         # 使用进度条处理所有视频
         for video_path, label_path, subject_path in tqdm(all_video_paths, desc="Processing Videos"):
@@ -117,7 +119,7 @@ class VideoSequenceDataset(Dataset):
                 
                 self.cached_sequences.append((sequence_tensor, target_label))
         
-        print(f"数据集加载完成，共创建了 {len(self.cached_sequences)} 个序列样本")
+        print(f"{self.data_name}数据集加载完成，共创建了 {len(self.cached_sequences)} 个序列样本")
 
     def __len__(self):
         return len(self.cached_sequences)

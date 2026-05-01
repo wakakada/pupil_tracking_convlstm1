@@ -239,7 +239,7 @@ class PupilTrackingConvLSTM(nn.Module):
             nn.ReLU(inplace=True),
             nn.Linear(128, 2)
         )
-        
+
         # 时序聚合模块 - 保持简单有效
         self.temporal_aggregator = nn.Sequential(
             nn.Conv3d(1, 8, kernel_size=(3, 3, 3), padding=(1, 1, 1)),
@@ -317,6 +317,7 @@ class PupilTrackingConvLSTM(nn.Module):
             fused_coords = dynamic_weight * center_coords + (1 - dynamic_weight) * torch.sigmoid(regression_output)
             
             return fused_coords
+
     
     def compute_centroid_from_mask(self, mask, height, width):
         """

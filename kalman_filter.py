@@ -1,171 +1,191 @@
 import numpy as np
-import cv2
-
-class PupilKalmanFilter:
-    def __init__(self, dt=1, process_noise=1e-2, measurement_noise=1e-1):
-        """
-        初始化卡尔曼滤波器用于瞳孔追踪
-        
-        参数:
-        - dt: 时间步长 (默认为1，因为视频帧是连续的)
-        - process_noise: 过程噪声 (系统模型不确定性)
-        - measurement_noise: 测量噪声 (观测不确定性)
-        """
-        self.dt = dt
-        
-        # 状态向量 [x, y, vx, vy] - 位置和速度
-        self.state = np.array([[0.0], [0.0], [0.0], [0.0]])  # [x, y, vx, vy]
-        
-        # 状态转移矩阵
-        self.F = np.array([
-            [1, 0, dt, 0],
-            [0, 1, 0, dt],
-            [0, 0, 1, 0],
-            [0, 0, 0, 1]
-        ])
-        
-        # 控制矩阵 (这里没有控制输入，所以为0)
-        self.B = np.zeros((4, 1))
-        
-        # 观测矩阵 - 我们只能观测位置，不能直接观测速度
-        self.H = np.array([
-            [1, 0, 0, 0],
-            [0, 1, 0, 0]
-        ])
-        
-        # 过程噪声协方差矩阵
-        self.Q = np.array([
-            [dt**4/4, 0,       dt**3/2, 0      ],
-            [0,       dt**4/4, 0,       dt**3/2],
-            [dt**3/2, 0,       dt**2,   0      ],
-            [0,       dt**3/2, 0,       dt**2  ]
-        ]) * process_noise
-        
-        # 测量噪声协方差矩阵
-        self.R = np.eye(2) * measurement_noise  # 2x2 因为我们观测的是 [x, y]
-        
-        # 误差协方差矩阵
-        self.P = np.eye(4) * 1000  # 初始化为较大的不确定性
-
-    def predict(self):
-        """预测步骤：基于系统模型预测下一状态"""
-        # X(k|k-1) = F * X(k-1|k-1) + B * U(k)
-        self.state = np.dot(self.F, self.state)
-        
-        # P(k|k-1) = F * P(k-1|k-1) * F.T + Q
-        self.P = np.dot(np.dot(self.F, self.P), self.F.T) + self.Q
-        
-        return self.state[:2].flatten()  # 返回预测的位置 [x, y]
-
-    def update(self, measurement):
-        """更新步骤：使用测量值更新状态估计"""
-        # 计算卡尔曼增益
-        S = np.dot(np.dot(self.H, self.P), self.H.T) + self.R
-        K = np.dot(np.dot(self.P, self.H.T), np.linalg.inv(S))
-        
-        # 更新状态估计
-        y = np.array(measurement).reshape(-1, 1) - np.dot(self.H, self.state)  # 测量残差
-        self.state = self.state + np.dot(K, y)
-        
-        # 更新误差协方差矩阵
-        I = np.eye(len(self.state))
-        self.P = np.dot((I - np.dot(K, self.H)), self.P)
-        
-        return self.state[:2].flatten()  # 返回更新后的位置 [x, y]
-    
-    def initialize(self, initial_position):
-        """初始化滤波器状态"""
-        self.state[0:2] = np.array(initial_position).reshape(2, 1)
-        # 速度初始为0
-        self.state[2:4] = np.array([0.0, 0.0]).reshape(2, 1)
 
 
-class AdaptiveKalmanFilter:
-    def __init__(self, process_noise_scale=1e-1, measurement_noise_scale=1e-1):
-        """
-        自适应卡尔曼滤波器，用于瞳孔跟踪
-        """
-        # 定义状态向量: [x, y, vx, vy] (位置和速度)
-        self.kalman = cv2.KalmanFilter(4, 2)  # 4个状态变量，2个测量变量
-        
-        # 状态转移矩阵 (F) - 匀速模型
-        self.kalman.transitionMatrix = np.array([
-            [1, 0, 1, 0],
-            [0, 1, 0, 1],
-            [0, 0, 1, 0],
-            [0, 0, 0, 1]
-        ], dtype=np.float32)
-        
-        # 测量矩阵 (H) - 我们只能观测位置，不能观测速度
-        self.kalman.measurementMatrix = np.array([
-            [1, 0, 0, 0],
-            [0, 1, 0, 0]
-        ], dtype=np.float32)
-        
-        # 过程噪声协方差矩阵 (Q) - 系统模型的不确定性
-        # 增加过程噪声，使滤波器更愿意接受新测量
-        self.process_noise_scale = process_noise_scale
-        self.kalman.processNoiseCov = np.array([
-            [1, 0, 0, 0],
-            [0, 1, 0, 0],
-            [0, 0, 1, 0],
-            [0, 0, 0, 1]
-        ], dtype=np.float32) * (process_noise_scale ** 2)
-        
-        # 测量噪声协方差矩阵 (R) - 观测的不确定性
-        # 适当设置测量噪声，不要过大也不要过小
-        self.measurement_noise_scale = measurement_noise_scale
-        self.kalman.measurementNoiseCov = np.array([
-            [1, 0],
-            [0, 1]
-        ], dtype=np.float32) * (measurement_noise_scale ** 2)
-        
-        # 误差协方差矩阵 (P) - 初始不确定性
-        self.kalman.errorCovPost = np.array([
-            [1, 0, 0, 0],
-            [0, 1, 0, 0],
-            [0, 0, 1, 0],
-            [0, 0, 0, 1]
-        ], dtype=np.float32) * 1.0
-        
-        # 初始化状态
+class RandomWalkKalmanTracker:
+    """随机游走卡尔曼滤波器 — 无运动假设，适合眼球跟踪。
+
+    状态: [x, y] (仅位置，不做速度外推)
+    运动模型: x_k = x_{k-1} + w  (w ~ N(0, Q))
+    观测模型: z_k = x_k + v      (v ~ N(0, R))
+
+    与 CV 卡尔曼的关键区别: F = I，不做匀速预测，
+    跳视时不会按上一帧速度方向"跑偏"。
+    """
+    def __init__(self, process_noise=1e-1, measurement_noise=5e-2):
+        self.F = np.eye(2)
+        self.H = np.eye(2)
+        self.Q = np.eye(2) * process_noise
+        self.R = np.eye(2) * measurement_noise
+        self.P = np.eye(2) * 100
+        self.x = np.zeros(2)
         self.initialized = False
-        self.prev_measurement = None
-        self.dt = 1  # 时间步长假设为1帧
-        
+
     def update(self, measurement):
-        """
-        更新卡尔曼滤波器并返回预测结果
-        """
-        measurement = np.array(measurement, dtype=np.float32).reshape(2, 1)
-        
+        measurement = np.array(measurement, dtype=np.float64)
+
         if not self.initialized:
-            # 第一次测量，初始化状态
-            self.kalman.statePre = np.array([
-                measurement[0, 0],  # x
-                measurement[1, 0],  # y
-                0,                  # vx
-                0                   # vy
-            ], dtype=np.float32)
-            
-            self.kalman.statePost = np.array([
-                measurement[0, 0],  # x
-                measurement[1, 0],  # y
-                0,                  # vx
-                0                   # vy
-            ], dtype=np.float32)
-            
+            self.x = measurement.copy()
+            self.P = np.eye(2) * 100
             self.initialized = True
-            self.prev_measurement = measurement.copy()
-            return measurement.flatten()
-        
+            return self.x.copy(), None
+
+        # 预测 (F = I → x_pred = x, P_pred = P + Q)
+        x_pred = self.x
+        P_pred = self.P + self.Q
+
+        # 更新 (H = I)
+        S = P_pred + self.R
+        K = P_pred @ np.linalg.inv(S)
+        innovation = measurement - x_pred
+
+        self.x = x_pred + K @ innovation
+        self.P = (np.eye(2) - K) @ P_pred
+        self.P = (self.P + self.P.T) / 2
+
+        return self.x.copy(), None
+
+    def reset(self):
+        self.x = np.zeros(2)
+        self.P = np.eye(2) * 100
+        self.initialized = False
+
+
+class AdaptiveKalmanTracker:
+    """自适应卡尔曼滤波器 — 根据实时运动速度动态调整过程噪声协方差。
+
+    状态: [x, y, vx, vy] (位置 + 速度)
+    运动模型: 匀速模型 (CV)，F 按 dt=1 构造
+    观测模型: z_k = H @ x_k + v  (只观测位置)
+
+    Q 的自适应策略:
+      - 低速 (平滑追踪/注视): Q 缩小 → 侧重平滑，抑制抖动
+      - 高速 (扫视/跳视):   Q 放大 → 加速响应，减少滞后
+
+    Q 缩放函数使用 tanh 平滑过渡，避免硬阈值切换。
+    """
+
+    def __init__(self,
+                 base_process_noise=1e-2,
+                 measurement_noise=5e-2,
+                 speed_midpoint=0.02,
+                 vel_sensitivity=80.0,
+                 min_q_scale=0.05,
+                 max_q_scale=20.0,
+                 ema_alpha=0.3):
+        """
+        Args:
+            base_process_noise: Q 的基础值（位置分量）
+            measurement_noise:   观测噪声 R
+            speed_midpoint:      速度中点（归一化坐标/帧），scale=0.5*(min+max) 时的速度
+            vel_sensitivity:     tanh 过渡的陡峭程度，越大过渡越陡
+            min_q_scale:         Q 最小缩放因子（低速时，强平滑）
+            max_q_scale:         Q 最大缩放因子（高速时，快响应）
+            ema_alpha:           速度估计的指数移动平均系数
+        """
+        # 状态转移矩阵 (CV 模型, dt=1)
+        self.F = np.array([[1, 0, 1, 0],
+                           [0, 1, 0, 1],
+                           [0, 0, 1, 0],
+                           [0, 0, 0, 1]], dtype=np.float64)
+
+        # 观测矩阵 — 只观测位置
+        self.H = np.array([[1, 0, 0, 0],
+                           [0, 1, 0, 0]], dtype=np.float64)
+
+        self.Q_base_pos = base_process_noise
+        self.Q_base_vel = base_process_noise * 0.25  # 速度分量基础噪声更小
+
+        self.R = np.eye(2) * measurement_noise
+        self.P = np.eye(4) * 100
+        self.x = np.zeros(4)
+        self.initialized = False
+
+        # 自适应参数
+        self.speed_midpoint = speed_midpoint
+        self.vel_sensitivity = vel_sensitivity
+        self.min_q_scale = min_q_scale
+        self.max_q_scale = max_q_scale
+        self.ema_alpha = ema_alpha
+
+        # 速度估计状态
+        self._ema_speed = 0.0
+        self._prev_measurement = None
+        self._current_q_scale = 1.0
+
+    def _compute_q_scale(self, speed):
+        """tanh 平滑过渡: speed → Q scale factor."""
+        x = (speed - self.speed_midpoint) * self.vel_sensitivity
+        x = np.clip(x, -5.0, 5.0)
+        scale = self.min_q_scale + \
+                (self.max_q_scale - self.min_q_scale) * 0.5 * (1.0 + np.tanh(x))
+        return scale
+
+    def _build_Q(self, scale):
+        """根据缩放因子构造 Q 矩阵。"""
+        q_pos = self.Q_base_pos * scale
+        q_vel = self.Q_base_vel * scale
+        return np.diag([q_pos, q_pos, q_vel, q_vel])
+
+    @property
+    def current_q_scale(self):
+        return self._current_q_scale
+
+    @property
+    def estimated_speed(self):
+        return self._ema_speed
+
+    def update(self, measurement):
+        measurement = np.array(measurement, dtype=np.float64)
+
+        if not self.initialized:
+            self.x[0] = measurement[0]
+            self.x[1] = measurement[1]
+            self.x[2] = 0.0
+            self.x[3] = 0.0
+            self.P = np.eye(4) * 100
+            self.initialized = True
+            self._prev_measurement = measurement.copy()
+            return self.x[:2].copy(), {
+                'speed': 0.0,
+                'q_scale': 1.0,
+                'innovation': np.zeros(2)
+            }
+
+        # 估计当前速度 (基于原始测量的帧间位移)
+        raw_speed = np.linalg.norm(measurement - self._prev_measurement)
+        self._ema_speed = (self.ema_alpha * raw_speed +
+                           (1 - self.ema_alpha) * self._ema_speed)
+        self._prev_measurement = measurement.copy()
+
+        # 根据速度自适应调整 Q
+        q_scale = self._compute_q_scale(self._ema_speed)
+        self._current_q_scale = q_scale
+        Q = self._build_Q(q_scale)
+
         # 预测
-        prediction = self.kalman.predict()
-        
+        x_pred = self.F @ self.x
+        P_pred = self.F @ self.P @ self.F.T + Q
+
         # 更新
-        estimation = self.kalman.correct(measurement)
-        
-        # 更新之前的测量值
-        self.prev_measurement = measurement.copy()
-        
-        return estimation[:2].flatten()
+        S = self.H @ P_pred @ self.H.T + self.R
+        K = P_pred @ self.H.T @ np.linalg.inv(S)
+        innovation = measurement - self.H @ x_pred
+
+        self.x = x_pred + K @ innovation
+        self.P = (np.eye(4) - K @ self.H) @ P_pred
+        self.P = (self.P + self.P.T) / 2
+
+        info = {
+            'speed': self._ema_speed,
+            'q_scale': q_scale,
+            'innovation': innovation.copy()
+        }
+        return self.x[:2].copy(), info
+
+    def reset(self):
+        self.x = np.zeros(4)
+        self.P = np.eye(4) * 100
+        self.initialized = False
+        self._ema_speed = 0.0
+        self._prev_measurement = None
+        self._current_q_scale = 1.0
