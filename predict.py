@@ -160,8 +160,15 @@ def load_ground_truth(gt_path, orig_size=None):
 
     return [(x, y) for x, y in gt]
 
+def get_video_display_name(video_path, lpw_root):
+    """从视频路径提取显示名称，格式: 受试者/video.avi"""
+    rel_path = os.path.relpath(video_path, lpw_root)
+    return rel_path.replace('\\', '/')
+
+
 def predict_and_annotate_video(video_path, model_path, output_path, orig_size=None,
-                               confidence_threshold=None, ground_truth_path=None):
+                               confidence_threshold=None, ground_truth_path=None,
+                               video_name=None):
     """
     使用训练模型对视频逐帧预测并在原视频上标注瞳孔位置
 
@@ -172,11 +179,12 @@ def predict_and_annotate_video(video_path, model_path, output_path, orig_size=No
         orig_size: 原始视频尺寸 (width, height)，如果为None则自动获取
         confidence_threshold: 置信度阈值（如果模型输出置信度分数）
         ground_truth_path: 真实坐标CSV路径 (可选)，用于评估准确度
+        video_name: 视频显示名称，如 "5/10.avi"
     """
-    model = PupilTrackingConvLSTM().to(DEVICE)
+    model = PupilTrackingConvLSTM(hidden_dim=HIDDEN_DIM).to(DEVICE)
     model = load_model_weights(model, model_path)
     model.eval()
-    
+
     # 初始化卡尔曼滤波器
     kalman_filter = AdaptiveKalmanTracker()
 
@@ -203,8 +211,9 @@ def predict_and_annotate_video(video_path, model_path, output_path, orig_size=No
         ground_truth = load_ground_truth(ground_truth_path, orig_size)
         print(f"已加载真实坐标: {len(ground_truth)} 帧")
 
+    display_name = video_name if video_name else os.path.basename(video_path)
     frame_count = 0
-    print(f"开始处理视频: {video_path}")
+    print(f"开始处理视频: {display_name}")
     print(f"总帧数: {total_frames}, FPS: {fps}")
     print(f"原始视频尺寸: {original_width}x{original_height}")
     print(f"模型输入尺寸: {IMG_WIDTH}x{IMG_HEIGHT}")
@@ -266,8 +275,8 @@ def predict_and_annotate_video(video_path, model_path, output_path, orig_size=No
             pred_y = pred_norm[1] if len(pred_norm) > 1 else 0.5
 
         # 转换归一化坐标到原始视频尺寸
-        raw_x_pixel = int(float(pred_x) * orig_size[0])
-        raw_y_pixel = int(float(pred_y) * orig_size[1])
+        raw_x_pixel = round(float(pred_x) * orig_size[0])
+        raw_y_pixel = round(float(pred_y) * orig_size[1])
         
         # 应用卡尔曼滤波器平滑预测结果
         raw_coords = [raw_x_pixel, raw_y_pixel]
@@ -280,7 +289,7 @@ def predict_and_annotate_video(video_path, model_path, output_path, orig_size=No
         
         # 确保filtered_coords是数组格式并提取前两个元素
         filtered_coords = np.asarray(filtered_coords)
-        x_pixel, y_pixel = int(filtered_coords[0]), int(filtered_coords[1])
+        x_pixel, y_pixel = round(filtered_coords[0]), round(filtered_coords[1])
 
         # 收集坐标用于最终评估
         all_raw_coords.append((raw_x_pixel, raw_y_pixel))
@@ -324,13 +333,14 @@ def predict_and_annotate_video(video_path, model_path, output_path, orig_size=No
     return frame_count
 
 def predict_video_with_coordinates(video_path, model_path, orig_size=None, use_kalman=True,
-                                   ground_truth_path=None):
+                                   ground_truth_path=None, video_name=None):
     """
     返回预测坐标但不标注视频
     Args:
         ground_truth_path: 真实坐标CSV路径 (可选)，用于评估准确度
+        video_name: 视频显示名称，如 "5/10.avi"
     """
-    model = PupilTrackingConvLSTM().to(DEVICE)
+    model = PupilTrackingConvLSTM(hidden_dim=HIDDEN_DIM).to(DEVICE)
     model = load_model_weights(model, model_path)
     model.eval()
 
@@ -438,14 +448,16 @@ def predict_video_with_coordinates(video_path, model_path, orig_size=None, use_k
 
 if __name__ == "__main__":
     # ── 配置 ──
-    input_video_path = os.path.join(LPW_ROOT, "5\\10.avi")
+    subject_id = "5"
+    video_file = "10.avi"
+    input_video_path = os.path.join(LPW_ROOT, subject_id, video_file)
+    video_display_name = f"{subject_id}/{video_file}"  # 格式: 受试者/video.avi
     # input_video_path = "D:\\vedio2.mp4"
     model_path = "checkpoints.pth"
-    output_video_path = "annotated_pupil_tracking.mp4"
+    output_video_path = f"annotated_{subject_id}_{video_file.replace('.avi', '.mp4')}"
     use_kalman_filter = True    # 是否使用卡尔曼滤波器
-    ground_truth_path = os.path.join(LPW_ROOT, "5\\10.txt")  # 真实坐标: x y 空格分隔
+    ground_truth_path = os.path.join(LPW_ROOT, subject_id, video_file.replace('.avi', '.txt'))
 
-    import os
     if not os.path.exists(model_path):
         print(f"模型文件不存在: {model_path}")
         print("请确保模型文件存在后再运行此脚本")
@@ -456,6 +468,8 @@ if __name__ == "__main__":
         print("请确保视频文件存在后再运行此脚本")
         exit(1)
 
+    print(f"处理视频: {video_display_name}")
+
     # 处理视频并添加标注
     total_frames = predict_and_annotate_video(
         video_path=input_video_path,
@@ -463,21 +477,25 @@ if __name__ == "__main__":
         output_path=output_video_path,
         orig_size=(640, 480),
         ground_truth_path=ground_truth_path,
+        video_name=video_display_name,
     )
 
     # 获取坐标数据
     coords = predict_video_with_coordinates(
-        input_video_path, model_path, ground_truth_path=ground_truth_path)
+        input_video_path, model_path,
+        ground_truth_path=ground_truth_path,
+        video_name=video_display_name)
 
     # 打印部分坐标信息
     for i, (raw_x, raw_y, filtered_x, filtered_y) in enumerate(coords[:10]):
         print(f"Frame {i}: Raw({raw_x:.1f}, {raw_y:.1f}), Filtered({filtered_x:.1f}, {filtered_y:.1f})")
 
-    # 保存坐标到CSV文件
-    with open("predictions.csv", "w", newline="") as f:
+    # 保存坐标到CSV文件，包含视频名称以便区分
+    csv_path = f"predictions_{subject_id}_{video_file.replace('.avi', '.csv')}"
+    with open(csv_path, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["frame", "raw_x", "raw_y", "filtered_x", "filtered_y"])
+        writer.writerow(["video", "frame", "raw_x", "raw_y", "filtered_x", "filtered_y"])
         for i, (raw_x, raw_y, filtered_x, filtered_y) in enumerate(coords):
-            writer.writerow([i, f"{raw_x:.2f}", f"{raw_y:.2f}", f"{filtered_x:.2f}", f"{filtered_y:.2f}"])
+            writer.writerow([video_display_name, i, f"{raw_x:.2f}", f"{raw_y:.2f}", f"{filtered_x:.2f}", f"{filtered_y:.2f}"])
 
-    print("预测坐标已保存到 predictions.csv")
+    print(f"预测坐标已保存到 {csv_path}")

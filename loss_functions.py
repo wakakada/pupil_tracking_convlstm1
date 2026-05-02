@@ -21,3 +21,31 @@ class EuclideanDistanceLoss(nn.Module):
         # 返回平均距离作为损失
         loss = torch.mean(euclidean_dist)
         return loss * self.weight, {'euclidean_loss': loss.item()}
+
+
+class HeatmapLoss(nn.Module):
+    """热力图监督损失：预测热力图对齐到 GT 坐标生成的高斯热斑"""
+    def __init__(self, h, w, sigma=3.0):
+        super().__init__()
+        self.h, self.w = h, w
+        self.sigma = sigma
+        self.mse = nn.MSELoss()
+
+    def forward(self, heatmap, gt_coords):
+        """
+        heatmap: (B, 1, H, W)  sigmoid 输出，值域 [0,1]
+        gt_coords: (B, 2)  归一化坐标 [x, y]
+        """
+        B = heatmap.size(0)
+        yy, xx = torch.meshgrid(
+            torch.arange(self.h, dtype=torch.float32, device=heatmap.device),
+            torch.arange(self.w, dtype=torch.float32, device=heatmap.device),
+            indexing='ij'
+        )
+        target = torch.zeros_like(heatmap)
+        for b in range(B):
+            cx = gt_coords[b, 0] * self.w
+            cy = gt_coords[b, 1] * self.h
+            gauss = torch.exp(-((xx - cx)**2 + (yy - cy)**2) / (2 * self.sigma**2))
+            target[b, 0] = gauss
+        return self.mse(heatmap, target)

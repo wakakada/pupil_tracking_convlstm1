@@ -1,42 +1,20 @@
 import torch
 import torch.nn as nn
-from config import *
 
-class LightweightAttention(nn.Module):
-    """轻量级注意力模块，减少计算开销"""
-    def __init__(self, hidden_dim, reduction=8):
-        super(LightweightAttention, self).__init__()
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)
-        self.fc = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim // reduction, bias=False),
-            nn.ReLU(inplace=True),
-            nn.Linear(hidden_dim // reduction, hidden_dim, bias=False),
-            nn.Sigmoid()
-        )
-
-    def forward(self, x):
-        b, c, _, _ = x.size()
-        y = self.avg_pool(x).view(b, c)
-        y = self.fc(y).view(b, c, 1, 1)
-        return x * y.expand_as(x)
 
 class ConvLSTMCell(nn.Module):
     def __init__(self, input_dim, hidden_dim, kernel_size, bias):
-        """
-        ConvLSTM单元
-        """
         super(ConvLSTMCell, self).__init__()
 
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
-
         self.kernel_size = kernel_size
         self.padding = kernel_size[0] // 2, kernel_size[1] // 2
         self.bias = bias
 
         self.conv = nn.Conv2d(
             in_channels=self.input_dim + self.hidden_dim,
-            out_channels=4 * self.hidden_dim,  # 分别对应遗忘门、输入门、候选细胞状态、输出门
+            out_channels=4 * self.hidden_dim,
             kernel_size=self.kernel_size,
             padding=self.padding,
             bias=self.bias
@@ -44,9 +22,7 @@ class ConvLSTMCell(nn.Module):
 
     def forward(self, input_tensor, cur_state):
         h_cur, c_cur = cur_state
-
-        combined = torch.cat([input_tensor, h_cur], dim=1)  # concatenate along channel axis
-
+        combined = torch.cat([input_tensor, h_cur], dim=1)
         combined_conv = self.conv(combined)
         cc_i, cc_f, cc_o, cc_g = torch.split(combined_conv, self.hidden_dim, dim=1)
 
@@ -57,7 +33,6 @@ class ConvLSTMCell(nn.Module):
 
         c_next = f * c_cur + i * g
         h_next = o * torch.tanh(c_next)
-
         return h_next, c_next
 
     def init_hidden(self, batch_size, image_size):
@@ -72,7 +47,6 @@ class ConvLSTM(nn.Module):
 
         self._check_kernel_size_consistency(kernel_size)
 
-        # 确保hidden_dim和kernel_size是一致的格式
         kernel_size = self._extend_for_multilayer(kernel_size, num_layers)
         hidden_dim = self._extend_for_multilayer(hidden_dim, num_layers)
         if not len(kernel_size) == len(hidden_dim) == num_layers:
@@ -89,7 +63,6 @@ class ConvLSTM(nn.Module):
         cell_list = []
         for i in range(0, self.num_layers):
             cur_input_dim = self.input_dim if i == 0 else self.hidden_dim[i - 1]
-
             cell_list.append(ConvLSTMCell(
                 input_dim=cur_input_dim,
                 hidden_dim=self.hidden_dim[i],
@@ -101,16 +74,13 @@ class ConvLSTM(nn.Module):
 
     def forward(self, input_tensor, hidden_state=None):
         if not self.batch_first:
-            # (t, b, c, h, w) -> (b, t, c, h, w)
             input_tensor = input_tensor.permute(1, 0, 2, 3, 4)
 
         b, _, _, h, w = input_tensor.size()
 
-        # Implement state initialization logic
         if hidden_state is not None:
             raise NotImplementedError()
         else:
-            # Since the init is done in forward. Can send image size here
             hidden_state = self._init_hidden(batch_size=b, image_size=(h, w))
 
         layer_output_list = []
@@ -125,7 +95,6 @@ class ConvLSTM(nn.Module):
 
             layer_output = torch.stack(output_inner, dim=1)
             cur_layer_input = layer_output
-
             layer_output_list.append(layer_output)
 
         if not self.return_all_layers:
@@ -143,7 +112,7 @@ class ConvLSTM(nn.Module):
     def _check_kernel_size_consistency(kernel_size):
         if not (isinstance(kernel_size, tuple) or
                 (isinstance(kernel_size, list) and all(isinstance(elem, tuple) for elem in kernel_size))):
-            raise ValueError('[kernel_size](file://e:\school\毕设\convlstm-eyetracking\convlstm.py#L0-L0) must be tuple or list of tuples')
+            raise ValueError('kernel_size must be tuple or list of tuples')
 
     @staticmethod
     def _extend_for_multilayer(param, num_layers):
@@ -152,58 +121,29 @@ class ConvLSTM(nn.Module):
         return param
 
 
-class ResidualBlock(nn.Module):
-    """残差块，用于在不增加太多参数的情况下提升网络深度"""
-    def __init__(self, channels, kernel_size=3, stride=1):
-        super(ResidualBlock, self).__init__()
-        self.conv1 = nn.Conv2d(channels, channels, kernel_size=kernel_size, 
-                               stride=stride, padding=kernel_size//2, bias=False)
-        self.bn1 = nn.BatchNorm2d(channels)
-        self.relu = nn.ReLU(inplace=True)
-        self.conv2 = nn.Conv2d(channels, channels, kernel_size=kernel_size, 
-                               stride=stride, padding=kernel_size//2, bias=False)
-        self.bn2 = nn.BatchNorm2d(channels)
-        
-    def forward(self, x):
-        residual = x
-        out = self.relu(self.bn1(self.conv1(x)))
-        out = self.bn2(self.conv2(out))
-        out += residual  # 残差连接
-        out = self.relu(out)
-        return out
-
-
 class PupilTrackingConvLSTM(nn.Module):
-    def __init__(self, input_dim=1, hidden_dim=64, kernel_size=(3, 3), num_layers=2, dropout_rate=0.5):
-        """
-        基于分割的瞳孔追踪模型 - 使用ConvLSTM进行时序分割和回归
-        """
+    """瞳孔追踪模型：CNN编码 + ConvLSTM时序 + 热力图质心定位"""
+    def __init__(self, input_dim=1, hidden_dim=48, kernel_size=(3, 3), num_layers=1):
         super(PupilTrackingConvLSTM, self).__init__()
-        
-        # 使用残差块改进的空间特征提取器
+
+        # 空间特征提取器：1→16→32→hidden_dim，仅一次下采样（22×30 热力图）
         self.spatial_extractor = nn.Sequential(
-            nn.Conv2d(input_dim, 32, kernel_size=3, padding=1),
+            nn.Conv2d(input_dim, 16, kernel_size=3, padding=1),
+            nn.BatchNorm2d(16),
+            nn.ReLU(inplace=True),                        # (16, H, W)
+
+            nn.Conv2d(16, 32, kernel_size=3, padding=1),
             nn.BatchNorm2d(32),
             nn.ReLU(inplace=True),
-            
-            ResidualBlock(32),
-            
-            nn.MaxPool2d(2),
-            
-            nn.Conv2d(32, 64, kernel_size=3, padding=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-            
-            ResidualBlock(64),
-            
-            nn.MaxPool2d(2),
-            
-            nn.Conv2d(64, hidden_dim, kernel_size=3, padding=1),
+            nn.MaxPool2d(2),                              # (32, H/2, W/2)
+
+            nn.Conv2d(32, hidden_dim, kernel_size=3, padding=1),
             nn.BatchNorm2d(hidden_dim),
             nn.ReLU(inplace=True),
+            nn.Dropout2d(0.15)                          # (hidden_dim, H/2, W/2)
         )
-        
-        # ConvLSTM层 - 保持原有参数
+
+        # ConvLSTM 时序建模
         self.convlstm = ConvLSTM(
             input_dim=hidden_dim,
             hidden_dim=hidden_dim,
@@ -211,150 +151,71 @@ class PupilTrackingConvLSTM(nn.Module):
             num_layers=num_layers,
             batch_first=True
         )
-        
-        # 轻量级注意力机制
-        self.attention = LightweightAttention(hidden_dim, reduction=8)
-        
-        # 简化但有效的分割解码器
-        self.segmentation_decoder = nn.Sequential(
-            nn.ConvTranspose2d(hidden_dim, 64, kernel_size=3, stride=2, padding=1, output_padding=1),
-            nn.BatchNorm2d(64),
+
+        # 热力图解码器：hidden_dim → 1，上采样回原图尺寸
+        self.heatmap_head = nn.Sequential(
+            nn.Dropout2d(0.1),
+            nn.Conv2d(hidden_dim, 16, kernel_size=3, padding=1),
+            nn.BatchNorm2d(16),
             nn.ReLU(inplace=True),
-            
-            nn.ConvTranspose2d(64, 32, kernel_size=3, stride=2, padding=1, output_padding=1),
-            nn.BatchNorm2d(32),
-            nn.ReLU(inplace=True),
-            
-            nn.Conv2d(32, 1, kernel_size=1),  # 输出单通道分割掩码
-            nn.Sigmoid()  # 输出0-1之间的分割概率
-        )
-        
-        # 改进的回归分支 - 使用轻量级注意力
-        self.regression_branch = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(hidden_dim * (IMG_HEIGHT//4) * (IMG_WIDTH//4), 256),  # 根据实际尺寸调整
-            nn.ReLU(inplace=True),
-            nn.Dropout(dropout_rate),
-            nn.Linear(256, 128),
-            nn.ReLU(inplace=True),
-            nn.Linear(128, 2)
+            nn.Conv2d(16, 1, kernel_size=1),
         )
 
-        # 时序聚合模块 - 保持简单有效
-        self.temporal_aggregator = nn.Sequential(
-            nn.Conv3d(1, 8, kernel_size=(3, 3, 3), padding=(1, 1, 1)),
-            nn.BatchNorm3d(8),
-            nn.ReLU(inplace=True),
-            nn.Conv3d(8, 1, kernel_size=(3, 3, 3), padding=(1, 1, 1)),
-            nn.Sigmoid()
-        )
-    
+        # 上采样倍率：一次 MaxPool 后尺寸为 H/2, W/2，放大 2 倍回原图
+        self.upsample = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
+
     def forward(self, x, return_segmentation=False):
         """
-        前向传播
-        x: (batch_size, seq_len, channels, height, width) - 输入视频序列
-        return_segmentation: 是否返回分割掩码
-        返回: (batch_size, 2) - 瞳孔中心坐标 (x, y)，可选择性返回分割掩码
+        x: (batch, seq_len, channels, height, width)
+        返回: (batch, 2) 归一化瞳孔坐标 [x, y]
         """
-        batch_size, seq_len, channels, height, width = x.size()
-        
-        # 提取每帧的空间特征
+        _, seq_len, _, _, _ = x.size()
+
+        # 逐帧提取空间特征
         features = []
         for t in range(seq_len):
-            frame = x[:, t, :, :, :]  # (batch, channels, height, width)
-            feat = self.spatial_extractor(frame)  # (batch, hidden_dim, h//4, w//4)
+            frame = x[:, t, :, :, :]
+            feat = self.spatial_extractor(frame)          # (batch, hidden_dim, H/2, W/2)
             features.append(feat)
-        
-        # 组合成序列
-        features = torch.stack(features, dim=1)  # (batch, seq_len, hidden_dim, h//4, w//4)
-        
-        # 通过ConvLSTM进行时序建模
-        lstm_features, _ = self.convlstm(features)
-        lstm_features = lstm_features[0]  # (batch, seq_len, hidden_dim, h//4, w//4)
-        
-        # 应用轻量级注意力机制
-        attended_lstm_features = []
-        for t in range(seq_len):
-            feat_t = lstm_features[:, t, :, :, :]  # (batch, hidden_dim, h//4, w//4)
-            attended_feat = self.attention(feat_t)  # (batch, hidden_dim, h//4, w//4)
-            attended_lstm_features.append(attended_feat)
-        
-        attended_lstm_features = torch.stack(attended_lstm_features, dim=1)  # (batch, seq_len, hidden_dim, h//4, w//4)
-        
-        # 回归分支 - 使用注意力加权后的特征
-        # 平均所有时间步的加权特征
-        avg_attended_features = torch.mean(attended_lstm_features, dim=1)  # (batch, hidden_dim, h//4, w//4)
-        regression_output = self.regression_branch(avg_attended_features)
-        
-        # 对每帧生成分割掩码（使用注意力处理后的特征）
-        segmentation_masks = []
-        for t in range(seq_len):
-            mask = self.segmentation_decoder(attended_lstm_features[:, t, :, :, :])  # (batch, 1, height, width)
-            segmentation_masks.append(mask)
-        
-        # 组合所有分割掩码
-        segmentation_masks = torch.stack(segmentation_masks, dim=2)  # (batch, 1, seq_len, height, width)
-        
-        # 时序聚合 - 融合多帧分割结果
-        aggregated_mask = self.temporal_aggregator(segmentation_masks)  # (batch, 1, seq_len, height, width)
-        
-        # 取平均得到最终分割掩码
-        final_mask = torch.mean(aggregated_mask, dim=2, keepdim=False)  # (batch, 1, height, width)
-        
-        # 计算分割掩码的质心作为瞳孔中心
-        center_coords = self.compute_centroid_from_mask(final_mask, height, width)
-        
-        if return_segmentation:
-            return center_coords, final_mask, torch.sigmoid(regression_output)
-        else:
-            # 使用动态融合策略
-            # 计算分割掩码的置信度（掩码值的总和）
-            seg_confidence = torch.sum(final_mask.view(batch_size, -1), dim=1, keepdim=True)
-            seg_confidence = torch.sigmoid(seg_confidence / 100)  # 归一化到0-1
-            
-            # 动态融合两个分支的结果
-            dynamic_weight = seg_confidence.unsqueeze(1)  # 使用分割置信度作为权重
-            fused_coords = dynamic_weight * center_coords + (1 - dynamic_weight) * torch.sigmoid(regression_output)
-            
-            return fused_coords
 
-    
-    def compute_centroid_from_mask(self, mask, height, width):
+        features = torch.stack(features, dim=1)            # (batch, seq_len, hidden_dim, H/2, W/2)
+
+        # ConvLSTM 时序建模 — 最后一个时间步的输出已聚合全序列信息
+        lstm_out, _ = self.convlstm(features)
+        lstm_out = lstm_out[0]                             # (batch, seq_len, hidden_dim, H/2, W/2)
+        last_feat = lstm_out[:, -1, :, :, :]               # (batch, hidden_dim, H/2, W/2)
+
+        # 生成热力图 → 上采样 → 计算质心
+        heatmap = self.heatmap_head(last_feat)             # (batch, 1, H/2, W/2)
+        heatmap = self.upsample(heatmap)                   # (batch, 1, H, W)
+        heatmap = torch.sigmoid(heatmap)
+
+        # 从热力图加权平均计算瞳孔坐标（保留空间信息，实现亚像素精度）
+        coords = self._compute_centroid(heatmap)
+
+        if return_segmentation:
+            return coords, heatmap, coords
+        return coords
+
+    def _compute_centroid(self, heatmap):
         """
-        从分割掩码计算质心坐标
-        mask: (batch_size, 1, height, width) - 分割掩码
-        返回: (batch_size, 2) - 质心坐标 (x, y)
+        从热力图计算质心坐标。
+        heatmap: (batch, 1, H, W)
+        返回: (batch, 2) 归一化坐标 [x, y]
         """
-        batch_size = mask.size(0)
-        
-        # 获取当前掩码的实际高度和宽度
-        actual_height, actual_width = mask.shape[2], mask.shape[3]
-        
-        # 创建坐标网格
-        y_coords = torch.arange(actual_height, dtype=torch.float32, device=mask.device).view(1, 1, -1, 1).repeat(batch_size, 1, 1, actual_width)
-        x_coords = torch.arange(actual_width, dtype=torch.float32, device=mask.device).view(1, 1, 1, -1).repeat(batch_size, 1, actual_height, 1)
-        
-        # 计算加权坐标（使用掩码作为权重）
-        mask_flat = mask.view(batch_size, -1)  # (batch, height*width)
-        x_coords_flat = x_coords.view(batch_size, -1)  # (batch, height*width)
-        y_coords_flat = y_coords.view(batch_size, -1)  # (batch, height*width)
-        
-        # 确保三个flat tensor具有相同的最后一个维度
-        assert mask_flat.shape[1] == x_coords_flat.shape[1] == y_coords_flat.shape[1], \
-            f"Mismatched dimensions: mask_flat={mask_flat.shape[1]}, x_coords_flat={x_coords_flat.shape[1]}, y_coords_flat={y_coords_flat.shape[1]}"
-        
-        # 计算质心
-        sum_mask = torch.sum(mask_flat, dim=1, keepdim=True)  # (batch, 1)
-        sum_mask = torch.clamp(sum_mask, min=1e-8)  # 防止除零
-        
-        centroid_x = torch.sum(x_coords_flat * mask_flat, dim=1, keepdim=True) / sum_mask  # (batch, 1)
-        centroid_y = torch.sum(y_coords_flat * mask_flat, dim=1, keepdim=True) / sum_mask  # (batch, 1)
-        
-        # 归一化到[0,1]范围
-        norm_x = centroid_x / actual_width
-        norm_y = centroid_y / actual_height
-        
-        # 拼接坐标
-        centroids = torch.cat([norm_x, norm_y], dim=1)  # (batch, 2)
-        
+        batch_size, _, h, w = heatmap.shape
+
+        y_coords = torch.arange(h, dtype=torch.float32, device=heatmap.device).view(1, 1, -1, 1).repeat(batch_size, 1, 1, w)
+        x_coords = torch.arange(w, dtype=torch.float32, device=heatmap.device).view(1, 1, 1, -1).repeat(batch_size, 1, h, 1)
+
+        mask_flat = heatmap.view(batch_size, -1)
+        x_coords_flat = x_coords.view(batch_size, -1)
+        y_coords_flat = y_coords.view(batch_size, -1)
+
+        sum_mask = torch.clamp(torch.sum(mask_flat, dim=1, keepdim=True), min=1e-8)
+
+        centroid_x = torch.sum(x_coords_flat * mask_flat, dim=1, keepdim=True) / sum_mask
+        centroid_y = torch.sum(y_coords_flat * mask_flat, dim=1, keepdim=True) / sum_mask
+
+        centroids = torch.cat([centroid_x / w, centroid_y / h], dim=1)
         return centroids
