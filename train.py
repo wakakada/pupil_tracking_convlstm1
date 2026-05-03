@@ -25,9 +25,7 @@ def evaluate_model(model, test_loader, device, heatmap_criterion):
         for data, targets in tqdm(test_loader, desc="Testing"):
             data, targets = data.to(device), targets.to(device)
 
-            center_coords, final_mask, regression_output = model(data, return_segmentation=True)
-            preds = center_coords
-            seg_output = final_mask
+            preds, seg_output = model(data, return_segmentation=True)
 
             coord_loss, _ = criterion(pred_coords=preds, gt_coords=targets)
             hm_loss = heatmap_criterion(seg_output, targets)
@@ -75,9 +73,7 @@ def validate_model(epoch, model, val_loader, criterion, device, fold, heatmap_cr
         for batch_idx, (data, targets) in enumerate(val_pbar):
             data, targets = data.to(device), targets.to(device)
 
-            center_coords, final_mask, regression_output = model(data, return_segmentation=True)
-            preds = center_coords
-            seg_output = final_mask
+            preds, seg_output = model(data, return_segmentation=True)
 
             coord_loss, _ = criterion(pred_coords=preds, gt_coords=targets)
             hm_loss = heatmap_criterion(seg_output, targets)
@@ -90,8 +86,7 @@ def validate_model(epoch, model, val_loader, criterion, device, fold, heatmap_cr
 
                 sample_data = data[sample_idx:sample_idx+1]
                 sample_target = targets[sample_idx]
-                sample_center_coords, sample_final_mask, sample_regression_output = model(sample_data, return_segmentation=True)
-                sample_pred = sample_center_coords
+                sample_pred, _ = model(sample_data, return_segmentation=True)
 
                 orig_w, orig_h = 640, 480
                 pred_x_pixel = sample_pred[0, 0].item() * orig_w
@@ -247,9 +242,7 @@ def main():
                 data, targets = data.to(DEVICE), targets.to(DEVICE)
                 optimizer.zero_grad()
 
-                center_coords, final_mask, regression_output = model(data, return_segmentation=True)
-                preds = center_coords
-                seg_output = final_mask
+                preds, seg_output = model(data, return_segmentation=True)
 
                 coord_loss, _ = criterion(pred_coords=preds, gt_coords=targets)
                 hm_loss = heatmap_criterion(seg_output, targets)

@@ -20,15 +20,19 @@ class VideoSequenceDataset(Dataset):
         self.img_h, self.img_w = img_size
         self.sequence_length = sequence_length
         self.stride = stride
-        self.cached_sequences = []   # 存储所有 (sequence_tensor, target_tensor)
         self.augment_prob = augment_prob
         self.data_name = data_name
 
+        # 每个视频存为一个 (frames_uint8, labels_float32) 元组
+        # frames_uint8: (N, H, W)  uint8  —— 4.8KB/帧 vs 原来的 19KB/帧
+        # labels_array:  (N, 2)   float32 —— 已归一化坐标
+        self.video_data = []
+        # 序列索引: (video_idx, start_frame)，不在内存中缓存序列副本
+        self.sequence_indices = []
+
         print(f"正在加载{self.data_name}数据集，共 {len(video_items)} 个视频...")
 
-        # 使用进度条处理所有视频
         for video_path, label_path, video_name in tqdm(video_items, desc="Processing Videos"):
-            # 获取视频属性（总帧数，原始尺寸）
             cap = cv2.VideoCapture(video_path)
             if not cap.isOpened():
                 print(f"Warning: Cannot open video {video_path}, skipping...")
@@ -36,138 +40,123 @@ class VideoSequenceDataset(Dataset):
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
             orig_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             orig_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            cap.release()
 
             if total_frames < self.sequence_length:
                 print(f"Warning: Video {video_name} has only {total_frames} frames, less than required sequence length {self.sequence_length}, skipping...")
+                cap.release()
                 continue
 
-            # 读取所有标签（原始像素坐标）
+            # 读取所有帧为 uint8 灰度图
+            frames_list = []
+            for _ in range(total_frames):
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                resized = cv2.resize(gray, (self.img_w, self.img_h))
+                frames_list.append(resized)
+            cap.release()
+
+            if len(frames_list) < self.sequence_length:
+                print(f"Warning: Video {video_name} read only {len(frames_list)} valid frames, skipping...")
+                continue
+
+            frames_uint8 = np.stack(frames_list, axis=0)  # (N, H, W) uint8
+
+            # 读取标签并归一化
             with open(label_path, 'r') as f:
                 label_lines = [line.strip() for line in f.readlines()]
 
-            # 确保标签行数足够
-            if len(label_lines) < total_frames:
-                print(f"Warning: Label file {label_path} has fewer lines ({len(label_lines)}) than frames ({total_frames}), skipping video {video_name}")
-                continue
-
-            # 创建序列
-            frames = []
-            labels = []
-
-            # 一次性读取所有帧和标签
-            cap = cv2.VideoCapture(video_path)
-            for idx in range(total_frames):
-                ret, frame = cap.read()
-                if not ret:
-                    print(f"Warning: Cannot read frame {idx} from {video_name}, skipping")
-                    continue
-
-                # 处理图像
-                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                resized = cv2.resize(gray, (self.img_w, self.img_h))
-                normalized = resized.astype(np.float32) / 255.0
-                frame_tensor = torch.from_numpy(normalized).float()  # (H, W)
-
-                # 解析标签
-                line = label_lines[idx]
-                parts = line.split()
+            labels_list = []
+            n_valid = len(frames_list)
+            for idx in range(n_valid):
+                if idx >= len(label_lines):
+                    break
+                parts = label_lines[idx].split()
                 x, y = float(parts[0]), float(parts[1])
+                labels_list.append([x / orig_w, y / orig_h])
 
-                # 归一化坐标
-                x_norm = x / orig_w
-                y_norm = y / orig_h
-                label_tensor = torch.tensor([x_norm, y_norm], dtype=torch.float32)
+            labels_array = np.array(labels_list, dtype=np.float32)  # (N, 2)
 
-                frames.append(frame_tensor)
-                labels.append(label_tensor)
+            video_idx = len(self.video_data)
+            self.video_data.append((frames_uint8, labels_array))
 
-            cap.release()
+            # 仅记录序列起止索引，不在内存中构建序列张量
+            for start_idx in range(0, n_valid - self.sequence_length + 1, self.stride):
+                self.sequence_indices.append((video_idx, start_idx))
 
-            # 创建序列
-            for start_idx in range(0, len(frames) - self.sequence_length + 1, self.stride):
-                sequence_frames = frames[start_idx:start_idx + self.sequence_length]
-                sequence_labels = labels[start_idx:start_idx + self.sequence_length]
-
-                # 使用序列的最后一帧的标签作为目标
-                target_label = sequence_labels[-1]
-
-                # 将帧序列堆叠成张量 (seq_len, H, W)
-                sequence_tensor = torch.stack(sequence_frames)
-                sequence_tensor = sequence_tensor.unsqueeze(1)  # 添加通道维度 -> (seq_len, 1, H, W)
-
-                self.cached_sequences.append((sequence_tensor, target_label))
-
-        print(f"{self.data_name}数据集加载完成，共创建了 {len(self.cached_sequences)} 个序列样本")
+        print(f"{self.data_name}数据集加载完成，共创建了 {len(self.sequence_indices)} 个序列样本")
 
     def __len__(self):
-        return len(self.cached_sequences)
+        return len(self.sequence_indices)
 
     def __getitem__(self, idx):
-        sequence_tensor, target_label = self.cached_sequences[idx]
+        video_idx, start_frame = self.sequence_indices[idx]
+        frames_uint8, labels_array = self.video_data[video_idx]
 
-        # 应用数据增强
+        # 切片 uint8 视图 → float32 归一化（仅对 12 帧做，几乎无开销）
+        seq_slice = frames_uint8[start_frame:start_frame + self.sequence_length]  # (seq_len, H, W) uint8 view
+        sequence_tensor = torch.from_numpy(seq_slice).float() / 255.0               # (seq_len, H, W) float32
+        sequence_tensor = sequence_tensor.unsqueeze(1)                              # (seq_len, 1, H, W)
+
+        target_label = torch.from_numpy(labels_array[start_frame + self.sequence_length - 1])  # (2,)
+
         if random.random() < self.augment_prob:
-            sequence_tensor = self._apply_augmentation(sequence_tensor)
+            do_flip = random.random() < 0.5
+            sequence_tensor = self._apply_augmentation(sequence_tensor, do_flip)
+            if do_flip:
+                target_label = target_label.clone()
+                target_label[0] = 1.0 - target_label[0]
 
-        return sequence_tensor, target_label   # 返回序列和目标标签
+        return sequence_tensor, target_label
 
-    def _apply_augmentation(self, sequence_tensor):
-        """对序列中的每一帧应用数据增强"""
+    def _apply_augmentation(self, sequence_tensor, do_flip=False):
+        """对序列中的每一帧应用数据增强（翻转在整个序列上一致）"""
         augmented_sequence = sequence_tensor.clone()
 
-        for frame_idx in range(sequence_tensor.size(0)):  # 遍历序列中的每一帧
-            frame = augmented_sequence[frame_idx, 0]  # 提取单帧 (H, W)
+        for frame_idx in range(sequence_tensor.size(0)):
+            frame = augmented_sequence[frame_idx, 0]  # (H, W)
 
-            # 随机翻转
-            if random.random() < 0.5:
-                frame = torch.flip(frame, [1])  # 水平翻转
+            if do_flip:
+                frame = torch.flip(frame, [1])
 
-            # 随机亮度调整
             if random.random() < 0.3:
                 brightness_factor = random.uniform(0.8, 1.2)
                 frame = torch.clamp(frame * brightness_factor, 0.0, 1.0)
 
-            # 随机对比度调整
             if random.random() < 0.3:
                 contrast_factor = random.uniform(0.8, 1.2)
                 mean_val = torch.mean(frame)
                 frame = torch.clamp((frame - mean_val) * contrast_factor + mean_val, 0.0, 1.0)
 
-            # 添加高斯噪声
             if random.random() < 0.2:
                 noise_std = random.uniform(0.0, 0.05)
                 noise = torch.randn_like(frame) * noise_std
                 frame = torch.clamp(frame + noise, 0.0, 1.0)
 
-            # 随机伽马变换
             if random.random() < 0.2:
                 gamma = random.uniform(0.8, 1.2)
                 frame = torch.pow(frame, gamma)
 
-            # 随机平移 ±4 像素
             if random.random() < 0.3:
                 dx = random.randint(-4, 4)
                 dy = random.randint(-4, 4)
                 frame = torch.roll(frame, shifts=(dy, dx), dims=(0, 1))
 
-            # 随机高斯模糊
             if random.random() < 0.1:
                 import torchvision.transforms as transforms
                 transform = transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 1.0))
                 frame = transform(frame.unsqueeze(0)).squeeze(0)
 
-            # 随机遮挡
             if random.random() < 0.1:
                 h, w = frame.shape
-                # 随机选择一个小矩形区域进行遮挡
                 start_h = random.randint(0, h-5)
                 start_w = random.randint(0, w-5)
                 rect_h = random.randint(2, 5)
                 rect_w = random.randint(2, 5)
-                frame[start_h:start_h+rect_h, start_w:start_w+rect_w] = 0.5  # 用中性灰遮挡
+                frame[start_h:start_h+rect_h, start_w:start_w+rect_w] = 0.5
 
-            augmented_sequence[frame_idx, 0] = frame  # 存回序列
+            augmented_sequence[frame_idx, 0] = frame
 
         return augmented_sequence
 
@@ -185,7 +174,6 @@ def build_video_items(lpw_root):
     """
     video_items = []
 
-    # 获取所有受试者目录
     subject_dirs = [d for d in os.listdir(lpw_root) if os.path.isdir(os.path.join(lpw_root, d)) and d.isdigit()]
     subject_dirs.sort(key=int)
 
@@ -200,7 +188,7 @@ def build_video_items(lpw_root):
             label_path = os.path.join(subject_path, label_name)
 
             if os.path.exists(label_path):
-                video_name = f"{subject_id}/{vf}"  # 格式: "受试者/video.avi"
+                video_name = f"{subject_id}/{vf}"
                 video_items.append((video_path, label_path, video_name))
             else:
                 print(f"Warning: Label file {label_path} not found, skipping {video_name}")

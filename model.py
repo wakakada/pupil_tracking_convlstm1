@@ -123,8 +123,11 @@ class ConvLSTM(nn.Module):
 
 class PupilTrackingConvLSTM(nn.Module):
     """瞳孔追踪模型：CNN编码 + ConvLSTM时序 + 热力图质心定位"""
-    def __init__(self, input_dim=1, hidden_dim=48, kernel_size=(3, 3), num_layers=1):
+    def __init__(self, input_dim=1, hidden_dim=48, kernel_size=(3, 3), num_layers=1,
+                 img_size=(60, 80)):
         super(PupilTrackingConvLSTM, self).__init__()
+
+        self.img_h, self.img_w = img_size
 
         # 空间特征提取器：1→16→32→hidden_dim，仅一次下采样（22×30 热力图）
         self.spatial_extractor = nn.Sequential(
@@ -164,10 +167,16 @@ class PupilTrackingConvLSTM(nn.Module):
         # 上采样倍率：一次 MaxPool 后尺寸为 H/2, W/2，放大 2 倍回原图
         self.upsample = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
 
+        # 预计算质心坐标网格 (1, 1, H, W)，避免每次 forward 重建
+        y_coords = torch.arange(self.img_h, dtype=torch.float32).view(1, 1, -1, 1)
+        x_coords = torch.arange(self.img_w, dtype=torch.float32).view(1, 1, 1, -1)
+        self.register_buffer('_grid_y', y_coords, persistent=False)
+        self.register_buffer('_grid_x', x_coords, persistent=False)
+
     def forward(self, x, return_segmentation=False):
         """
         x: (batch, seq_len, channels, height, width)
-        返回: (batch, 2) 归一化瞳孔坐标 [x, y]
+        返回: (batch, 2) 归一化瞳孔坐标 [x, y]，或 (coords, heatmap) 当 return_segmentation=True
         """
         _, seq_len, _, _, _ = x.size()
 
@@ -194,23 +203,24 @@ class PupilTrackingConvLSTM(nn.Module):
         coords = self._compute_centroid(heatmap)
 
         if return_segmentation:
-            return coords, heatmap, coords
+            return coords, heatmap
         return coords
 
     def _compute_centroid(self, heatmap):
         """
-        从热力图计算质心坐标。
+        从热力图计算质心坐标（使用预缓存网格，避免每次重建）。
         heatmap: (batch, 1, H, W)
         返回: (batch, 2) 归一化坐标 [x, y]
         """
         batch_size, _, h, w = heatmap.shape
 
-        y_coords = torch.arange(h, dtype=torch.float32, device=heatmap.device).view(1, 1, -1, 1).repeat(batch_size, 1, 1, w)
-        x_coords = torch.arange(w, dtype=torch.float32, device=heatmap.device).view(1, 1, 1, -1).repeat(batch_size, 1, h, 1)
+        # 使用预缓存的坐标网格（expand 不分配新内存）
+        y_coords = self._grid_y.expand(batch_size, -1, h, w)
+        x_coords = self._grid_x.expand(batch_size, -1, h, w)
 
         mask_flat = heatmap.view(batch_size, -1)
-        x_coords_flat = x_coords.view(batch_size, -1)
-        y_coords_flat = y_coords.view(batch_size, -1)
+        x_coords_flat = x_coords.reshape(batch_size, -1)
+        y_coords_flat = y_coords.reshape(batch_size, -1)
 
         sum_mask = torch.clamp(torch.sum(mask_flat, dim=1, keepdim=True), min=1e-8)
 

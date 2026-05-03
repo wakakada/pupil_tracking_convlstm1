@@ -42,10 +42,8 @@ class HeatmapLoss(nn.Module):
             torch.arange(self.w, dtype=torch.float32, device=heatmap.device),
             indexing='ij'
         )
-        target = torch.zeros_like(heatmap)
-        for b in range(B):
-            cx = gt_coords[b, 0] * self.w
-            cy = gt_coords[b, 1] * self.h
-            gauss = torch.exp(-((xx - cx)**2 + (yy - cy)**2) / (2 * self.sigma**2))
-            target[b, 0] = gauss
+        cx = gt_coords[:, 0] * self.w  # (B,)
+        cy = gt_coords[:, 1] * self.h  # (B,)
+        dist_sq = (xx - cx.view(B, 1, 1)) ** 2 + (yy - cy.view(B, 1, 1)) ** 2
+        target = torch.exp(-dist_sq / (2 * self.sigma ** 2)).unsqueeze(1)  # (B, 1, H, W)
         return self.mse(heatmap, target)

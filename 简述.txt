@@ -1,3 +1,9 @@
 3折交叉验证
 Random Walk Kalman
 欧氏距离损失函数
+stride=3
+H×W = 60×80
+weight_decay=2e-3
+梯度裁剪
+SEQUENCE_LENGTH = 12
+数据增强概率=0.7

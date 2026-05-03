@@ -2,8 +2,8 @@ import torch
 import os
 
 # LPW_ROOT = os.path.join(os.path.dirname(os.path.dirname(__file__)), "LPW")
-# LPW_ROOT = "./LPW"
-LPW_ROOT = "/kaggle/input/datasets/wakakaele/eyetracking-lpw/LPW"
+LPW_ROOT = "./LPW"
+# LPW_ROOT = "/kaggle/input/datasets/wakakaele/eyetracking-lpw/LPW"
 
 RANDOM_SEED = 42  # 随机数种子
 k_folds = 3 # K折交叉验证的折数
@@ -30,6 +30,3 @@ WEIGHT_DECAY = 2e-3
 HIDDEN_DIM = 64
 HEATMAP_LOSS_WEIGHT = 0.1
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-# 模型保存路径
-# MODEL_SAVE_PATH = "./checkpoints.pth"

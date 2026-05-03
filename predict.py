@@ -31,6 +31,35 @@ def load_model_weights(model, model_path):
     
     return model
 
+
+def _preprocess_frame(frame):
+    """将单帧 BGR 图像转换为模型输入 tensor: (1, 1, H, W) float32 [0,1]"""
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    resized = cv2.resize(gray, (IMG_WIDTH, IMG_HEIGHT))
+    return torch.from_numpy(resized).float().unsqueeze(0).unsqueeze(0) / 255.0
+
+
+def _build_input_sequence(frame_buffer):
+    """从帧缓冲构建模型输入，不足 seq_len 时用最后一帧填充。
+       返回: (1, seq_len, 1, H, W)"""
+    if len(frame_buffer) < SEQUENCE_LENGTH:
+        recent = frame_buffer + [frame_buffer[-1]] * (SEQUENCE_LENGTH - len(frame_buffer))
+    else:
+        recent = frame_buffer[-SEQUENCE_LENGTH:]
+    return torch.stack(recent, dim=1)
+
+
+def _model_predict(model, sequence):
+    """对构建好的序列执行推理，返回 (x, y) 归一化坐标。"""
+    with torch.no_grad():
+        pred_norm = model(sequence).cpu().numpy()
+    if pred_norm.ndim > 1:
+        pred_norm = pred_norm[0]
+    if pred_norm.size >= 2:
+        return float(pred_norm.flatten()[0]), float(pred_norm.flatten()[1])
+    return 0.5, 0.5
+
+
 def compute_kalman_metrics(raw_coords, filtered_coords, ground_truth=None):
     """
     评估滤波效果。
@@ -232,47 +261,12 @@ def predict_and_annotate_video(video_path, model_path, output_path, orig_size=No
         
         # 保存原始帧用于输出
         original_frame = frame.copy()
-        
-        # 将输入帧调整为模型训练时的尺寸
-        frame_resized = cv2.resize(frame, (IMG_WIDTH, IMG_HEIGHT))
-            
-        # 预测瞳孔位置
-        gray = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2GRAY)
-        # 注意：这里不需要再次resize，因为我们已经resize到了模型训练的尺寸
-        resized = gray  # 已经是IMG_WIDTH x IMG_HEIGHT
-        frame_tensor = torch.from_numpy(resized).float().unsqueeze(0).unsqueeze(0) / 255.0  # shape: (1, 1, H, W)
-        frame_tensor = frame_tensor.to(DEVICE)
-        
-        # 将当前帧添加到缓冲区
+
+        # 预处理 → 构建序列 → 模型推理
+        frame_tensor = _preprocess_frame(frame).to(DEVICE)
         frame_buffer.append(frame_tensor)
-        
-        # 如果缓冲区大小小于序列长度，使用重复的最后一帧填充
-        if len(frame_buffer) < SEQUENCE_LENGTH:
-            # 用重复的帧填充直到达到所需长度
-            recent_frames = frame_buffer + [frame_buffer[-1]] * (SEQUENCE_LENGTH - len(frame_buffer))
-            padded_sequence = torch.cat(recent_frames, dim=1)  # Concatenate along channel-like dimension
-        else:
-            # 取最后SEQUENCE_LENGTH帧并连接
-            recent_frames = frame_buffer[-SEQUENCE_LENGTH:]
-            padded_sequence = torch.cat(recent_frames, dim=1)  # Concatenate along channel-like dimension
-        
-        # 重塑为正确的5D张量 (batch, seq_len, channels, height, width)
-        batch_size, flat_channels, height, width = padded_sequence.shape
-        reshaped_sequence = padded_sequence.view(batch_size, SEQUENCE_LENGTH, 1, height, width)
-        
-        with torch.no_grad():
-            pred_norm = model(reshaped_sequence).cpu().numpy()
-            # 确保pred_norm是期望的形状并提取坐标
-            if pred_norm.ndim > 1:
-                pred_norm = pred_norm[0]  # 获取第一个样本的预测结果
-            
-        # 确保pred_norm是2维向量 [x, y]
-        if pred_norm.size == 2:
-            pred_x, pred_y = pred_norm.flatten()[:2]
-        else:
-            # 如果模型输出格式不同，根据实际情况调整
-            pred_x = pred_norm[0] if len(pred_norm) > 0 else 0.5
-            pred_y = pred_norm[1] if len(pred_norm) > 1 else 0.5
+        sequence = _build_input_sequence(frame_buffer)
+        pred_x, pred_y = _model_predict(model, sequence)
 
         # 转换归一化坐标到原始视频尺寸
         raw_x_pixel = round(float(pred_x) * orig_size[0])
@@ -330,7 +324,7 @@ def predict_and_annotate_video(video_path, model_path, output_path, orig_size=No
     cap.release()
     out.release()
     print(f"视频处理完成! 输出保存至: {output_path}")
-    return frame_count
+    return frame_count, all_raw_coords, all_filtered_coords
 
 def predict_video_with_coordinates(video_path, model_path, orig_size=None, use_kalman=True,
                                    ground_truth_path=None, video_name=None):
@@ -376,45 +370,11 @@ def predict_video_with_coordinates(video_path, model_path, orig_size=None, use_k
         if not ret:
             break
         
-        # 将输入帧调整为模型训练时的尺寸
-        frame_resized = cv2.resize(frame, (IMG_WIDTH, IMG_HEIGHT))
-            
-        gray = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2GRAY)
-        # 注意：这里不需要再次resize，因为我们已经resize到了模型训练的尺寸
-        resized = gray  # 已经是IMG_WIDTH x IMG_HEIGHT
-        frame_tensor = torch.from_numpy(resized).float().unsqueeze(0).unsqueeze(0) / 255.0  # shape: (1, 1, H, W)
-        frame_tensor = frame_tensor.to(DEVICE)
-        
-        # 将当前帧添加到缓冲区
+        # 预处理 → 构建序列 → 模型推理
+        frame_tensor = _preprocess_frame(frame).to(DEVICE)
         frame_buffer.append(frame_tensor)
-        
-        # 如果缓冲区大小小于序列长度，使用重复的最后一帧填充
-        if len(frame_buffer) < SEQUENCE_LENGTH:
-            # 用重复的帧填充直到达到所需长度
-            recent_frames = frame_buffer + [frame_buffer[-1]] * (SEQUENCE_LENGTH - len(frame_buffer))
-            padded_sequence = torch.cat(recent_frames, dim=1)  # Concatenate along channel-like dimension
-        else:
-            # 取最后SEQUENCE_LENGTH帧并连接
-            recent_frames = frame_buffer[-SEQUENCE_LENGTH:]
-            padded_sequence = torch.cat(recent_frames, dim=1)  # Concatenate along channel-like dimension
-        
-        # 重塑为正确的5D张量 (batch, seq_len, channels, height, width)
-        batch_size, flat_channels, height, width = padded_sequence.shape
-        reshaped_sequence = padded_sequence.view(batch_size, SEQUENCE_LENGTH, 1, height, width)
-        
-        with torch.no_grad():
-            pred_norm = model(reshaped_sequence).cpu().numpy()
-            # 确保pred_norm是期望的形状并提取坐标
-            if pred_norm.ndim > 1:
-                pred_norm = pred_norm[0]  # 获取第一个样本的预测结果
-            
-        # 确保pred_norm是2维向量 [x, y]
-        if pred_norm.size == 2:
-            pred_x, pred_y = pred_norm.flatten()[:2]
-        else:
-            # 如果模型输出格式不同，根据实际情况调整
-            pred_x = pred_norm[0] if len(pred_norm) > 0 else 0.5
-            pred_y = pred_norm[1] if len(pred_norm) > 1 else 0.5
+        sequence = _build_input_sequence(frame_buffer)
+        pred_x, pred_y = _model_predict(model, sequence)
 
         raw_x_pixel = float(pred_x) * orig_size[0]
         raw_y_pixel = float(pred_y) * orig_size[1]
@@ -470,8 +430,8 @@ if __name__ == "__main__":
 
     print(f"处理视频: {video_display_name}")
 
-    # 处理视频并添加标注
-    total_frames = predict_and_annotate_video(
+    # 处理视频并添加标注（一次推理，同时返回坐标）
+    total_frames, all_raw_coords, all_filtered_coords = predict_and_annotate_video(
         video_path=input_video_path,
         model_path=model_path,
         output_path=output_video_path,
@@ -480,11 +440,8 @@ if __name__ == "__main__":
         video_name=video_display_name,
     )
 
-    # 获取坐标数据
-    coords = predict_video_with_coordinates(
-        input_video_path, model_path,
-        ground_truth_path=ground_truth_path,
-        video_name=video_display_name)
+    # 组合为与旧接口兼容的坐标列表
+    coords = [(rx, ry, fx, fy) for (rx, ry), (fx, fy) in zip(all_raw_coords, all_filtered_coords)]
 
     # 打印部分坐标信息
     for i, (raw_x, raw_y, filtered_x, filtered_y) in enumerate(coords[:10]):
